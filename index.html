@@ -1,0 +1,612 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Last.fm Top Albums 3D</title>
+<style>
+html, body { margin: 0; height: 100%; overflow: hidden; background: #0b0d12; font-family: system-ui, sans-serif; color: #eee; }
+canvas { display: block; }
+#panel { position: absolute; top: 12px; left: 12px; width: 260px; padding: 12px; box-sizing: border-box; background: rgba(20, 22, 30, 0.88); border-radius: 8px; z-index: 2; }
+#panel input, #panel select, #panel button { width: 100%; box-sizing: border-box; margin: 4px 0; padding: 7px; background: #1c1f2a; color: #eee; border: 1px solid #333; border-radius: 4px; font: inherit; }
+#panel button { background: #d51007; border: none; cursor: pointer; font-weight: 600; }
+#panel button:disabled { opacity: 0.5; cursor: wait; }
+#status { font-size: 12px; opacity: 0.85; margin-top: 6px; min-height: 1.2em; }
+#hint { position: absolute; bottom: 12px; left: 12px; font-size: 12px; opacity: 0.6; z-index: 2; }
+#tooltip { position: absolute; display: none; pointer-events: none; background: rgba(0, 0, 0, 0.85); padding: 6px 10px; border-radius: 4px; font-size: 13px; white-space: nowrap; z-index: 3; }
+#modal { position: absolute; top: 12px; right: 12px; width: 280px; box-sizing: border-box; padding: 14px; background: rgba(20, 22, 30, 0.94); border-radius: 8px; z-index: 4; }
+#modal[hidden] { display: none; }
+#modalClose { position: absolute; top: 6px; right: 8px; background: none; border: none; color: #aaa; font-size: 22px; line-height: 1; cursor: pointer; }
+#modalCover { width: 100%; aspect-ratio: 1 / 1; object-fit: cover; border-radius: 4px; background: #1c1f2a; display: block; }
+#modalNoCover { width: 100%; aspect-ratio: 1 / 1; border-radius: 4px; background: #1c1f2a; display: flex; align-items: center; justify-content: center; font-size: 13px; opacity: 0.6; }
+#modalNoCover[hidden], #modalCover[hidden] { display: none; }
+#modalRank { font-size: 12px; opacity: 0.6; margin-top: 10px; }
+#modalTitle { font-size: 18px; margin: 4px 0; }
+#modalArtist { font-size: 14px; opacity: 0.85; }
+#modalPlays { font-size: 13px; opacity: 0.7; margin-top: 6px; }
+#modalLink { display: inline-block; margin-top: 12px; color: #ff6b5e; text-decoration: none; font-weight: 600; }
+#modalLink:hover { text-decoration: underline; }
+</style>
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  }
+}
+</script>
+</head>
+<body>
+<div id="panel">
+  <input id="apiKey" placeholder="Last.fm API key" autocomplete="off">
+  <input id="user" placeholder="Last.fm username" autocomplete="off">
+  <select id="period">
+    <option value="overall">All time</option>
+    <option value="12month">Last 12 months</option>
+    <option value="6month">Last 6 months</option>
+    <option value="3month">Last 3 months</option>
+    <option value="1month">Last month</option>
+    <option value="7day">Last 7 days</option>
+  </select>
+  <input id="limit" type="number" min="1" max="50" value="24" title="Number of albums">
+  <select id="layout">
+    <option value="pillars">Pillars</option>
+    <option value="grid">Grid wall</option>
+    <option value="coverflow">Cover flow</option>
+    <option value="snowglobe">Snow globe</option>
+  </select>
+  <button id="load">Load albums</button>
+  <div id="status"></div>
+</div>
+<div id="hint">Drag to orbit · Scroll to zoom · Click an album for details · ← → in Cover flow</div>
+<div id="tooltip"></div>
+<div id="modal" hidden>
+  <button id="modalClose" aria-label="Close">×</button>
+  <img id="modalCover" alt="">
+  <div id="modalNoCover" hidden>No cover art</div>
+  <div id="modalRank"></div>
+  <h2 id="modalTitle"></h2>
+  <div id="modalArtist"></div>
+  <div id="modalPlays"></div>
+  <a id="modalLink" target="_blank" rel="noopener">View on Last.fm →</a>
+</div>
+
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+const PLACEHOLDER = '2a96cbd8b46e442fc41c2b86b821562f';
+const GLOBE = { cy: 10.5, r: 9 };
+const $ = id => document.getElementById(id);
+
+const params = new URLSearchParams(location.search);
+$('apiKey').value = params.get('key') || localStorage.getItem('lastfmKey') || '';
+$('user').value = params.get('user') || '';
+if (params.get('period')) $('period').value = params.get('period');
+if (params.get('limit')) $('limit').value = params.get('limit');
+if (params.get('layout')) $('layout').value = params.get('layout');
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+document.body.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x0b0d12);
+scene.fog = new THREE.Fog(0x0b0d12, 40, 110);
+
+const camera = new THREE.PerspectiveCamera(50, innerWidth / innerHeight, 0.1, 300);
+camera.position.set(0, 16, 24);
+
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.target.set(0, 2, 0);
+controls.maxPolarAngle = Math.PI / 2 - 0.05;
+
+scene.add(new THREE.AmbientLight(0xffffff, 0.9));
+const sun = new THREE.DirectionalLight(0xffffff, 1.3);
+sun.position.set(12, 25, 15);
+scene.add(sun);
+
+const floor = new THREE.Mesh(
+  new THREE.CircleGeometry(80, 64),
+  new THREE.MeshStandardMaterial({ color: 0x14171f, roughness: 1 })
+);
+floor.rotation.x = -Math.PI / 2;
+scene.add(floor);
+
+const group = new THREE.Group();
+scene.add(group);
+
+const globeGroup = new THREE.Group();
+globeGroup.visible = false;
+scene.add(globeGroup);
+{
+  const base = new THREE.Mesh(
+    new THREE.CylinderGeometry(4.5, 5, 1.2, 48),
+    new THREE.MeshStandardMaterial({ color: 0x3a2418, roughness: 0.6 })
+  );
+  base.position.y = 0.6;
+  globeGroup.add(base);
+
+  const glass = new THREE.Mesh(
+    new THREE.SphereGeometry(GLOBE.r, 48, 32),
+    new THREE.MeshPhysicalMaterial({
+      color: 0xaaddff,
+      transparent: true,
+      opacity: 0.14,
+      roughness: 0.05,
+      depthWrite: false
+    })
+  );
+  glass.position.y = GLOBE.cy;
+  globeGroup.add(glass);
+
+  const snowCount = 400;
+  const snowPos = new Float32Array(snowCount * 3);
+  const snowRnd = mulberry32(99);
+  for (let i = 0; i < snowCount; i++) {
+    let x, y, z;
+    do {
+      x = (snowRnd() * 2 - 1) * GLOBE.r;
+      y = (snowRnd() * 2 - 1) * GLOBE.r;
+      z = (snowRnd() * 2 - 1) * GLOBE.r;
+    } while (x * x + y * y + z * z > GLOBE.r * GLOBE.r * 0.9);
+    snowPos[i * 3] = x;
+    snowPos[i * 3 + 1] = GLOBE.cy + y;
+    snowPos[i * 3 + 2] = z;
+  }
+  const snowGeo = new THREE.BufferGeometry();
+  snowGeo.setAttribute('position', new THREE.BufferAttribute(snowPos, 3));
+  globeGroup.add(new THREE.Points(snowGeo, new THREE.PointsMaterial({
+    color: 0xffffff,
+    size: 0.12,
+    transparent: true,
+    opacity: 0.8,
+    depthWrite: false
+  })));
+  globeGroup.userData.snow = snowGeo;
+}
+
+const loader = new THREE.TextureLoader();
+loader.setCrossOrigin('anonymous');
+
+const raycaster = new THREE.Raycaster();
+const pointer = new THREE.Vector2(9, 9);
+const tooltip = $('tooltip');
+const modal = $('modal');
+const dummy = new THREE.Object3D();
+const flatQ = new THREE.Quaternion().setFromEuler(new THREE.Euler(-Math.PI / 2, 0, 0));
+const uprightQ = new THREE.Quaternion();
+const identityQ = new THREE.Quaternion();
+const offset = new THREE.Vector3();
+const wobble = new THREE.Quaternion();
+const wobbleEuler = new THREE.Euler();
+
+let items = [];
+let covers = [];
+let hovered = null;
+let buildId = 0;
+let layout = 'pillars';
+let active = 0;
+let floatAmt = 0;
+let camGoal = null;
+
+function mulberry32(a) {
+  return function () {
+    a |= 0;
+    a = (a + 0x6D2B79F5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+function wrapLines(g, text, maxW) {
+  const lines = [];
+  let line = '';
+  for (const word of text.split(/\s+/)) {
+    const test = line ? `${line} ${word}` : word;
+    if (g.measureText(test).width > maxW && line) {
+      lines.push(line);
+      line = word;
+    } else {
+      line = test;
+    }
+  }
+  if (line) lines.push(line);
+  return lines.slice(0, 4);
+}
+
+function fallbackTexture(album, hue) {
+  const c = document.createElement('canvas');
+  c.width = c.height = 256;
+  const g = c.getContext('2d');
+  const grad = g.createLinearGradient(0, 0, 256, 256);
+  grad.addColorStop(0, `hsl(${hue} 60% 42%)`);
+  grad.addColorStop(1, `hsl(${(hue + 50) % 360} 60% 18%)`);
+  g.fillStyle = grad;
+  g.fillRect(0, 0, 256, 256);
+  g.fillStyle = '#fff';
+  g.textAlign = 'center';
+  g.textBaseline = 'middle';
+  g.font = 'bold 28px system-ui, sans-serif';
+  const titleLines = wrapLines(g, album.name, 220);
+  titleLines.forEach((l, i) => g.fillText(l, 128, 128 + (i - (titleLines.length - 1) / 2) * 34));
+  g.font = '18px system-ui, sans-serif';
+  g.globalAlpha = 0.8;
+  const artistLines = wrapLines(g, album.artist.name, 220);
+  g.fillText(artistLines[0] || '', 128, 232);
+  const tex = new THREE.CanvasTexture(c);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  return tex;
+}
+
+function getImageUrl(album) {
+  const img = (album.image || []).find(i => i.size === 'extralarge') || (album.image || []).at(-1);
+  const url = img?.['#text'];
+  return url && !url.includes(PLACEHOLDER) ? url : null;
+}
+
+function loadCover(url) {
+  return new Promise(resolve => {
+    loader.load(
+      url,
+      tex => { tex.colorSpace = THREE.SRGBColorSpace; resolve(tex); },
+      undefined,
+      () => resolve(null)
+    );
+  });
+}
+
+function clearGroup() {
+  group.traverse(obj => {
+    if (obj.geometry) obj.geometry.dispose();
+    if (obj.material) {
+      if (obj.material.map) obj.material.map.dispose();
+      obj.material.dispose();
+    }
+  });
+  group.clear();
+  items = [];
+  covers = [];
+  hovered = null;
+  tooltip.style.display = 'none';
+}
+
+async function fetchTopAlbums(key, user, period, limit) {
+  const url = new URL('https://ws.audioscrobbler.com/2.0/');
+  url.search = new URLSearchParams({
+    method: 'user.gettopalbums',
+    user,
+    period,
+    limit: String(limit),
+    api_key: key,
+    format: 'json'
+  });
+  const res = await fetch(url);
+  const data = await res.json();
+  if (data.error) throw new Error(data.message || `Last.fm error ${data.error}`);
+  return [].concat(data.topalbums?.album ?? []);
+}
+
+function computeLayout(name, n) {
+  const cols = Math.ceil(Math.sqrt(n));
+  const rows = Math.ceil(n / cols);
+
+  if (name === 'pillars') {
+    const spacing = 2.6;
+    return {
+      cam: { pos: new THREE.Vector3(0, 16, 24), target: new THREE.Vector3(0, 2, 0) },
+      at: (i, item) => ({
+        pos: new THREE.Vector3(
+          (Math.floor(i / rows) - (cols - 1) / 2) * spacing,
+          item.h + 0.02,
+          ((i % rows) - (rows - 1) / 2) * spacing
+        ),
+        quat: flatQ
+      })
+    };
+  }
+
+  if (name === 'grid') {
+    const spacing = 2.3;
+    const w = (cols - 1) * spacing;
+    const hgt = (rows - 1) * spacing;
+    const centerY = 1 + hgt / 2;
+    return {
+      cam: {
+        pos: new THREE.Vector3(0, centerY, Math.max(w, hgt) * 0.9 + 12),
+        target: new THREE.Vector3(0, centerY, 0)
+      },
+      at: i => ({
+        pos: new THREE.Vector3(
+          ((i % cols) - (cols - 1) / 2) * spacing,
+          1 + hgt - Math.floor(i / cols) * spacing,
+          0
+        ),
+        quat: uprightQ
+      })
+    };
+  }
+
+  if (name === 'coverflow') {
+    return {
+      cam: { pos: new THREE.Vector3(0, 2.6, 9), target: new THREE.Vector3(0, 1.6, 0) },
+      at: i => {
+        const d = i - active;
+        const ad = Math.abs(d);
+        const s = Math.sign(d);
+        const k = Math.min(ad, 1);
+        const extra = Math.max(0, ad - 1);
+        return {
+          pos: new THREE.Vector3(s * (k * 2.2 + extra * 1.3), 1.6, -k * 1.5 - extra * 0.4),
+          quat: new THREE.Quaternion().setFromEuler(new THREE.Euler(0, -s * k * 0.9, 0))
+        };
+      }
+    };
+  }
+
+  return {
+    cam: { pos: new THREE.Vector3(0, GLOBE.cy, 32), target: new THREE.Vector3(0, GLOBE.cy, 0) },
+    at: i => {
+      const r = mulberry32(i * 7919 + 17);
+      const u = r() * 2 - 1;
+      const th = r() * Math.PI * 2;
+      const rad = Math.sqrt(1 - u * u);
+      const rr = 7.2 * Math.cbrt(0.3 + 0.7 * r());
+      const pos = new THREE.Vector3(rr * rad * Math.cos(th), GLOBE.cy + rr * u, rr * rad * Math.sin(th));
+      dummy.position.copy(pos);
+      dummy.lookAt(0, GLOBE.cy, 32);
+      return { pos, quat: dummy.quaternion.clone() };
+    }
+  };
+}
+
+function applyLayout(name) {
+  layout = name;
+  const L = computeLayout(name, items.length);
+  items.forEach((it, i) => {
+    const t = L.at(i, it);
+    it.targetPos = t.pos;
+    it.targetQ = t.quat;
+  });
+  camGoal = L.cam;
+  globeGroup.visible = name === 'snowglobe';
+}
+
+async function build(albums) {
+  const id = ++buildId;
+  const status = $('status');
+  status.textContent = 'Loading cover art…';
+
+  const textures = await Promise.all(albums.map(a => {
+    const url = getImageUrl(a);
+    return url ? loadCover(url) : Promise.resolve(null);
+  }));
+  if (id !== buildId) return;
+
+  clearGroup();
+  active = 0;
+
+  const n = albums.length;
+  const maxPlays = Math.max(1, ...albums.map(a => Number(a.playcount) || 0));
+
+  albums.forEach((album, i) => {
+    const plays = Number(album.playcount) || 0;
+    const hue = (i / n) * 360;
+    const h = 0.4 + 8 * (plays / maxPlays);
+
+    const pillarGeo = new THREE.BoxGeometry(1.9, 1, 1.9);
+    pillarGeo.translate(0, 0.5, 0);
+    const pillar = new THREE.Mesh(pillarGeo, new THREE.MeshStandardMaterial({
+      color: new THREE.Color().setHSL(hue / 360, 0.55, 0.4),
+      roughness: 0.6,
+      metalness: 0.1
+    }));
+    pillar.scale.y = 0.001;
+    group.add(pillar);
+
+    const tex = textures[i] || fallbackTexture(album, hue);
+    const cover = new THREE.Mesh(
+      new THREE.PlaneGeometry(1.9, 1.9),
+      new THREE.MeshStandardMaterial({ map: tex, roughness: 0.5, side: THREE.DoubleSide })
+    );
+    cover.userData = { album, index: i, hovered: false };
+    group.add(cover);
+    covers.push(cover);
+
+    items.push({ album, h, cover, pillar, cur: new THREE.Vector3(), curQ: new THREE.Quaternion(), targetPos: null, targetQ: null });
+  });
+
+  const L = computeLayout(layout, n);
+  items.forEach((it, i) => {
+    const t = L.at(i, it);
+    it.cur.set(t.pos.x, 0, t.pos.z);
+    it.curQ.copy(t.quat);
+  });
+  applyLayout(layout);
+
+  status.textContent = `Showing ${n} album${n === 1 ? '' : 's'}.`;
+}
+
+function openModal(album) {
+  const url = getImageUrl(album);
+  const cover = $('modalCover');
+  const noCover = $('modalNoCover');
+  if (url) {
+    cover.src = url;
+    cover.hidden = false;
+    noCover.hidden = true;
+  } else {
+    cover.removeAttribute('src');
+    cover.hidden = true;
+    noCover.hidden = false;
+  }
+  const rank = album['@attr']?.rank;
+  $('modalRank').textContent = rank ? `#${rank}` : '';
+  $('modalTitle').textContent = album.name;
+  $('modalArtist').textContent = album.artist.name;
+  $('modalPlays').textContent = `${Number(album.playcount).toLocaleString()} plays`;
+  $('modalLink').href = album.url;
+  modal.hidden = false;
+}
+
+function closeModal() {
+  modal.hidden = true;
+}
+
+$('modalClose').addEventListener('click', closeModal);
+
+addEventListener('keydown', e => {
+  if (e.key === 'Escape') {
+    closeModal();
+    return;
+  }
+  if (layout !== 'coverflow' || !items.length) return;
+  if (e.key === 'ArrowRight') active = Math.min(items.length - 1, active + 1);
+  else if (e.key === 'ArrowLeft') active = Math.max(0, active - 1);
+  else return;
+  applyLayout(layout);
+});
+
+$('load').addEventListener('click', async () => {
+  const key = $('apiKey').value.trim();
+  const user = $('user').value.trim();
+  const period = $('period').value;
+  const limit = Math.min(50, Math.max(1, parseInt($('limit').value, 10) || 24));
+  const status = $('status');
+  if (!key || !user) {
+    status.textContent = 'Enter an API key and a username.';
+    return;
+  }
+  localStorage.setItem('lastfmKey', key);
+  const btn = $('load');
+  btn.disabled = true;
+  status.textContent = 'Fetching top albums…';
+  try {
+    const albums = await fetchTopAlbums(key, user, period, limit);
+    if (!albums.length) {
+      clearGroup();
+      status.textContent = 'No albums found for that user and period.';
+    } else {
+      await build(albums);
+    }
+  } catch (err) {
+    status.textContent = `Error: ${err.message}`;
+  } finally {
+    btn.disabled = false;
+  }
+});
+
+$('layout').addEventListener('change', e => {
+  if (items.length) applyLayout(e.target.value);
+  else layout = e.target.value;
+});
+
+renderer.domElement.addEventListener('pointermove', e => {
+  pointer.set(
+    (e.clientX / innerWidth) * 2 - 1,
+    -(e.clientY / innerHeight) * 2 + 1
+  );
+  tooltip.style.left = `${e.clientX + 14}px`;
+  tooltip.style.top = `${e.clientY + 14}px`;
+});
+
+renderer.domElement.addEventListener('click', () => {
+  if (!hovered) return;
+  const index = hovered.userData.index;
+  if (layout === 'coverflow' && index !== active) {
+    active = index;
+    applyLayout(layout);
+    return;
+  }
+  openModal(hovered.userData.album);
+});
+
+function updateHover() {
+  raycaster.setFromCamera(pointer, camera);
+  const hit = raycaster.intersectObjects(covers, false)[0]?.object ?? null;
+  if (hit === hovered) return;
+  if (hovered) hovered.userData.hovered = false;
+  hovered = hit;
+  if (hovered) {
+    hovered.userData.hovered = true;
+    const a = hovered.userData.album;
+    tooltip.textContent = `${a.artist.name} — ${a.name} (${Number(a.playcount).toLocaleString()} plays)`;
+    tooltip.style.display = 'block';
+    renderer.domElement.style.cursor = 'pointer';
+  } else {
+    tooltip.style.display = 'none';
+    renderer.domElement.style.cursor = 'default';
+  }
+}
+
+function resize() {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+}
+addEventListener('resize', resize);
+
+const clock = new THREE.Clock();
+
+function animate() {
+  requestAnimationFrame(animate);
+  const t = clock.elapsedTime;
+  const k = 0.08;
+
+  floatAmt += ((layout === 'snowglobe' ? 1 : 0) - floatAmt) * 0.05;
+
+  items.forEach((it, i) => {
+    if (it.targetPos) {
+      it.cur.lerp(it.targetPos, k);
+      it.curQ.slerp(it.targetQ, k);
+    }
+    const f = floatAmt;
+    offset.set(
+      Math.sin(t * 0.5 + i * 1.7),
+      Math.sin(t * 0.35 + i * 2.1) * 0.6,
+      Math.cos(t * 0.4 + i * 1.3)
+    ).multiplyScalar(0.3 * f);
+    wobbleEuler.set(Math.sin(t * 0.6 + i) * 0.12 * f, Math.sin(t * 0.5 + i * 1.3) * 0.12 * f, 0);
+    wobble.setFromEuler(wobbleEuler);
+
+    const c = it.cover;
+    c.position.copy(it.cur).add(offset);
+    c.quaternion.copy(it.curQ).multiply(f > 0 ? wobble : identityQ);
+    const hs = c.scale.x + ((c.userData.hovered ? 1.08 : 1) - c.scale.x) * 0.2;
+    c.scale.set(hs, hs, 1);
+
+    const p = it.pillar;
+    p.position.set(it.cur.x, 0, it.cur.z);
+    const ps = layout === 'pillars' ? it.h : 0.001;
+    p.scale.y += (ps - p.scale.y) * k;
+  });
+
+  if (globeGroup.visible) {
+    const snow = globeGroup.userData.snow;
+    const arr = snow.attributes.position.array;
+    for (let i = 0; i < arr.length; i += 3) {
+      arr[i + 1] -= 0.01 + ((i * 0.37) % 0.02);
+      if (arr[i + 1] < GLOBE.cy - GLOBE.r) arr[i + 1] = GLOBE.cy + GLOBE.r * 0.9;
+    }
+    snow.attributes.position.needsUpdate = true;
+  }
+
+  if (camGoal) {
+    camera.position.lerp(camGoal.pos, 0.05);
+    controls.target.lerp(camGoal.target, 0.05);
+  }
+
+  updateHover();
+  controls.update();
+  renderer.render(scene, camera);
+}
+animate();
+
+if ($('apiKey').value && $('user').value) $('load').click();
+</script>
+</body>
+</html>
